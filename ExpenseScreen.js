@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   SafeAreaView,
   View,
@@ -9,41 +9,226 @@ import {
   TouchableOpacity,
   StyleSheet,
   Modal,
+  ScrollView,
 } from 'react-native';
 import { useSQLiteContext } from 'expo-sqlite';
-import DateTimePicker from '@react-native-community/datetimepicker';
 
-const FILTERS = {
-  ALL: 'ALL',
-  WEEK: 'WEEK',
-  MONTH: 'MONTH',
+// --- Date Utility Functions for Filtering (Task 1B) ---
+const getStartAndEndOfMonth = () => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  
+  // Start of the month (YYYY-MM-01)
+  const start = new Date(year, month, 1).toISOString().split('T')[0];
+  
+  // End of the month (YYYY-MM-lastday)
+  const end = new Date(year, month + 1, 0).toISOString().split('T')[0];
+  
+  return { start, end };
 };
 
+const getStartAndEndOfWeek = () => {
+    const now = new Date();
+    const dayOfWeek = now.getDay(); // 0 = Sunday, 6 = Saturday
+    
+    // Calculate the date of the most recent Sunday (Start of the week)
+    // If today is Sunday, dayOfWeek is 0, so we subtract 0 days.
+    const startOfWeek = new Date(now);
+    startOfWeek.setDate(now.getDate() - dayOfWeek); 
+    const start = startOfWeek.toISOString().split('T')[0];
+    
+    // Calculate the date of the coming Saturday (End of the week)
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(startOfWeek.getDate() + 6);
+    const end = endOfWeek.toISOString().split('T')[0];
+    
+    return { start, end };
+};
+
+// --- ExpenseScreen Component ---
 export default function ExpenseScreen() {
   const db = useSQLiteContext();
 
-  // Add form states
+  // Task 1: Filtering State
+  const [filter, setFilter] = useState('All'); // 'All', 'This Week', 'This Month'
+  
+  // Base State (from original project)
+  const [expenses, setExpenses] = useState([]);
   const [amount, setAmount] = useState('');
   const [category, setCategory] = useState('');
   const [note, setNote] = useState('');
-  const [date, setDate] = useState(new Date());
-  const [showPicker, setShowPicker] = useState(false);
 
-  // Data states
-  const [expenses, setExpenses] = useState([]);
-  const [filter, setFilter] = useState(FILTERS.ALL);
-
-  // Edit modal states
-  const [editModalVisible, setEditModalVisible] = useState(false);
+  // Task 2: Totals State
+  const [overallTotal, setOverallTotal] = useState(0);
+  const [categoryTotals, setCategoryTotals] = useState([]);
+  
+  // Task 3: Editing State
   const [editingExpense, setEditingExpense] = useState(null);
-  const [editDate, setEditDate] = useState(new Date());
-  const [showEditPicker, setShowEditPicker] = useState(false);
+  const [editAmount, setEditAmount] = useState('');
+  const [editCategory, setEditCategory] = useState('');
+  const [editNote, setEditNote] = useState('');
 
-  // -----------------------------
-  // CREATE TABLE + LOAD DATA
-  // -----------------------------
+  // ------------------------------------
+  // Task 2: Analytics & Totals Functions
+  // ------------------------------------
+  const getFilterSql = (currentFilter) => {
+    let whereClause = '';
+    let params = [];
+    
+    if (currentFilter === 'This Month') {
+        const { start, end } = getStartAndEndOfMonth();
+        whereClause = 'WHERE date BETWEEN ? AND ?';
+        params = [start, end];
+    } else if (currentFilter === 'This Week') {
+        const { start, end } = getStartAndEndOfWeek();
+        whereClause = 'WHERE date BETWEEN ? AND ?';
+        params = [start, end];
+    }
+    return { whereClause, params };
+  }
+
+  const calculateTotals = useCallback(async (currentFilter) => {
+    const { whereClause, params } = getFilterSql(currentFilter);
+    
+    // 2A. Overall Total
+    try {
+        const overallResult = await db.getAllAsync(`
+            SELECT SUM(amount) as total FROM expenses ${whereClause};
+        `, params);
+        setOverallTotal(overallResult[0].total || 0);
+
+        // 2B. Category Totals
+        const categoryResult = await db.getAllAsync(`
+            SELECT category, SUM(amount) as total 
+            FROM expenses ${whereClause} 
+            GROUP BY category 
+            ORDER BY total DESC;
+        `, params);
+        setCategoryTotals(categoryResult);
+
+    } catch (error) {
+        console.error("Error calculating totals:", error);
+    }
+  }, [db]);
+
+
+  // ------------------------------------
+  // Task 1: Load and Filter Expenses
+  // ------------------------------------
+  const loadExpenses = useCallback(async (currentFilter) => {
+    const { whereClause, params } = getFilterSql(currentFilter);
+    
+    try {
+        const rows = await db.getAllAsync(
+            `SELECT * FROM expenses ${whereClause} ORDER BY id DESC;`,
+            params
+        );
+        setExpenses(rows);
+        await calculateTotals(currentFilter); // Update totals whenever expenses are loaded
+    } catch (error) {
+        console.error("Error loading expenses:", error);
+    }
+  }, [db, calculateTotals]);
+
+  // useEffect to handle filter changes
+  useEffect(() => {
+    loadExpenses(filter);
+  }, [filter, loadExpenses]);
+
+
+  // ------------------------------------
+  // CRUD Operations (with Task 1 date update)
+  // ------------------------------------
+
+  // Step 7: Adding an Expense (updated for Task 1 date)
+  const addExpense = async () => {
+    const amountNumber = parseFloat(amount);
+
+    if (isNaN(amountNumber) || amountNumber <= 0 || !category.trim()) {
+      alert("Please enter a valid amount and category.");
+      return;
+    }
+
+    const trimmedCategory = category.trim();
+    const trimmedNote = note.trim();
+    
+    // Task 1A: Get today's date in YYYY-MM-DD format
+    const today = new Date().toISOString().split('T')[0];
+
+    try {
+      await db.runAsync(
+        'INSERT INTO expenses (amount, category, note, date) VALUES (?, ?, ?, ?);',
+        [amountNumber, trimmedCategory, trimmedNote || null, today]
+      );
+      
+      setAmount('');
+      setCategory('');
+      setNote('');
+      loadExpenses(filter); // Refresh the list and totals
+
+    } catch (error) {
+        console.error("Error adding expense:", error);
+    }
+  };
+
+  // Step 8: Deleting an Expense
+  const deleteExpense = async (id) => {
+    try {
+        await db.runAsync('DELETE FROM expenses WHERE id = ?;', [id]);
+        loadExpenses(filter); // Refresh the list and totals
+    } catch (error) {
+        console.error("Error deleting expense:", error);
+    }
+  };
+
+  // Task 3: Handle Edit Selection
+  const handleEditSelect = (expense) => {
+    setEditingExpense(expense);
+    setEditAmount(expense.amount.toString());
+    setEditCategory(expense.category);
+    setEditNote(expense.note || '');
+  }
+
+  // Task 3: Editing/Updating an Expense
+  const saveEditedExpense = async () => {
+    const amountNumber = parseFloat(editAmount);
+    const id = editingExpense.id;
+
+    if (isNaN(amountNumber) || amountNumber <= 0 || !editCategory.trim()) {
+      alert("Please enter a valid amount and category for the update.");
+      return;
+    }
+
+    const trimmedCategory = editCategory.trim();
+    const trimmedNote = editNote.trim();
+    const date = editingExpense.date; // Use the existing date
+
+    try {
+      // Task 3B: SQLite UPDATE Query
+      await db.runAsync(
+        `UPDATE expenses 
+         SET amount = ?, category = ?, note = ?, date = ?
+         WHERE id = ?;`,
+        [amountNumber, trimmedCategory, trimmedNote || null, date, id]
+      );
+      
+      // Task 3C: Refreshing the UI
+      setEditingExpense(null);
+      loadExpenses(filter); // Refresh list and totals
+      
+    } catch (error) {
+      console.error("Error updating expense:", error);
+    }
+  };
+
+
+  // ------------------------------------
+  // Step 10: Table Setup Effect
+  // ------------------------------------
   useEffect(() => {
     async function setup() {
+      // Task 1A: Updated schema with date column
       await db.execAsync(`
         CREATE TABLE IF NOT EXISTS expenses (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,288 +238,168 @@ export default function ExpenseScreen() {
           date TEXT NOT NULL
         );
       `);
-      loadExpenses();
+      
+      // The initial load will happen via the 'filter' useEffect hook
     }
+
     setup();
-  }, []);
+  }, [db]);
 
-  const loadExpenses = async () => {
-    const rows = await db.getAllAsync(
-      'SELECT * FROM expenses ORDER BY date DESC;'
-    );
-    setExpenses(rows);
-  };
 
-  // -----------------------------
-  // ADD EXPENSE
-  // -----------------------------
-  const addExpense = async () => {
-    const amountNumber = parseFloat(amount);
-    if (isNaN(amountNumber) || amountNumber <= 0) return;
+  // ------------------------------------
+  // UI Rendering Helpers
+  // ------------------------------------
 
-    if (!category.trim()) return;
-
-    await db.runAsync(
-      `INSERT INTO expenses (amount, category, note, date)
-       VALUES (?, ?, ?, ?);`,
-      [amountNumber, category.trim(), note.trim() || null, date.toISOString()]
-    );
-
-    setAmount('');
-    setCategory('');
-    setNote('');
-    setDate(new Date());
-
-    loadExpenses();
-  };
-
-  // -----------------------------
-  // DELETE EXPENSE
-  // -----------------------------
-  const deleteExpense = async (id) => {
-    await db.runAsync('DELETE FROM expenses WHERE id = ?;', [id]);
-    loadExpenses();
-  };
-
-  // -----------------------------
-  // EDIT EXPENSE
-  // -----------------------------
-  const openEdit = (item) => {
-    setEditingExpense(item);
-    setEditDate(new Date(item.date));
-    setEditModalVisible(true);
-  };
-
-  const saveEdit = async () => {
-    const amountNumber = parseFloat(editingExpense.amount);
-    if (isNaN(amountNumber) || amountNumber <= 0) return;
-
-    await db.runAsync(
-      `UPDATE expenses
-       SET amount = ?, category = ?, note = ?, date = ?
-       WHERE id = ?;`,
-      [
-        amountNumber,
-        editingExpense.category.trim(),
-        editingExpense.note?.trim() || null,
-        editDate.toISOString(),
-        editingExpense.id,
-      ]
-    );
-
-    setEditModalVisible(false);
-    setEditingExpense(null);
-    loadExpenses();
-  };
-
-  // -----------------------------
-  // FILTER LOGIC
-  // -----------------------------
-  const getFilteredExpenses = () => {
-    if (filter === FILTERS.ALL) return expenses;
-
-    const now = new Date();
-
-    if (filter === FILTERS.WEEK) {
-      const start = new Date(now);
-      start.setDate(now.getDate() - now.getDay());
-      start.setHours(0, 0, 0, 0);
-
-      const end = new Date(start);
-      end.setDate(start.getDate() + 7);
-
-      return expenses.filter(e => {
-        const d = new Date(e.date);
-        return d >= start && d <= end;
-      });
-    }
-
-    if (filter === FILTERS.MONTH) {
-      const start = new Date(now.getFullYear(), now.getMonth(), 1);
-      const end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-
-      return expenses.filter(e => {
-        const d = new Date(e.date);
-        return d >= start && d < end;
-      });
-    }
-
-    return expenses;
-  };
-
-  const filtered = getFilteredExpenses();
-
-  // -----------------------------
-  // TOTALS
-  // -----------------------------
-  const total = filtered.reduce((acc, e) => acc + Number(e.amount), 0);
-
-  const categoryTotals = filtered.reduce((acc, e) => {
-    acc[e.category] = (acc[e.category] || 0) + Number(e.amount);
-    return acc;
-  }, {});
-
-  // -----------------------------
-  // RENDER ROW
-  // -----------------------------
+  // Step 9: Expense Row Renderer (updated for Task 3: Editing)
   const renderExpense = ({ item }) => (
-    <TouchableOpacity style={styles.expenseRow} onPress={() => openEdit(item)}>
+    <View style={styles.expenseRow}>
       <View style={{ flex: 1 }}>
         <Text style={styles.expenseAmount}>${Number(item.amount).toFixed(2)}</Text>
-        <Text style={styles.expenseCategory}>{item.category}</Text>
+        <Text style={styles.expenseCategory}>{item.category} ({item.date})</Text>
         {item.note ? <Text style={styles.expenseNote}>{item.note}</Text> : null}
-        <Text style={styles.expenseNote}>
-          {new Date(item.date).toLocaleDateString()}
-        </Text>
       </View>
 
+      <TouchableOpacity onPress={() => handleEditSelect(item)} style={styles.editButton}>
+        <Text style={styles.editText}>Edit</Text>
+      </TouchableOpacity>
+      
       <TouchableOpacity onPress={() => deleteExpense(item.id)}>
         <Text style={styles.delete}>✕</Text>
       </TouchableOpacity>
-    </TouchableOpacity>
+    </View>
   );
 
-  // -----------------------------
-  // UI
-  // -----------------------------
+  const filterButtons = ['All', 'This Week', 'This Month'];
+
+  // ------------------------------------
+  // Step 11: Main Component Return
+  // ------------------------------------
   return (
     <SafeAreaView style={styles.container}>
-      <Text style={styles.heading}>Student Expense Tracker</Text>
+      <ScrollView>
+        <Text style={styles.heading}>Student Expense Tracker</Text>
 
-      {/* FILTER BUTTONS */}
-      <View style={styles.filterRow}>
-        <Button title="All" onPress={() => setFilter(FILTERS.ALL)} />
-        <Button title="This Week" onPress={() => setFilter(FILTERS.WEEK)} />
-        <Button title="This Month" onPress={() => setFilter(FILTERS.MONTH)} />
-      </View>
+        {/* Task 1B: Filter UI */}
+        <View style={styles.filterContainer}>
+          {filterButtons.map((f) => (
+            <TouchableOpacity 
+              key={f} 
+              style={[
+                styles.filterButton, 
+                filter === f && styles.activeFilterButton
+              ]} 
+              onPress={() => setFilter(f)}
+            >
+              <Text style={styles.filterText}>{f}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
 
-      {/* TOTALS */}
-      <Text style={styles.total}>
-        Total: <Text style={{ color: '#fbbf24' }}>${total.toFixed(2)}</Text>
-      </Text>
-
-      {Object.entries(categoryTotals).map(([cat, amt]) => (
-        <Text key={cat} style={styles.categoryTotal}>
-          {cat}: <Text style={{ color: '#fbbf24' }}>${amt.toFixed(2)}</Text>
-        </Text>
-      ))}
-
-      {/* ADD FORM */}
-      <View style={styles.form}>
-        <TextInput
-          style={styles.input}
-          placeholder="Amount"
-          placeholderTextColor="#9ca3af"
-          keyboardType="numeric"
-          value={amount}
-          onChangeText={setAmount}
-        />
-
-        <TextInput
-          style={styles.input}
-          placeholder="Category"
-          placeholderTextColor="#9ca3af"
-          value={category}
-          onChangeText={setCategory}
-        />
-
-        <TextInput
-          style={styles.input}
-          placeholder="Note"
-          placeholderTextColor="#9ca3af"
-          value={note}
-          onChangeText={setNote}
-        />
-
-        <TouchableOpacity onPress={() => setShowPicker(true)}>
-          <Text style={styles.dateButton}>
-            Select Date: {date.toLocaleDateString()}
+        {/* Task 2: Totals Display */}
+        <View style={styles.totalsContainer}>
+          <Text style={styles.totalLabel}>
+            Total Spending ({filter}): 
+            <Text style={styles.overallTotalValue}> ${overallTotal.toFixed(2)}</Text>
           </Text>
-        </TouchableOpacity>
-
-        {showPicker && (
-          <DateTimePicker
-            value={date}
-            onChange={(e, selected) => {
-              setShowPicker(false);
-              if (selected) setDate(selected);
-            }}
-          />
-        )}
-
-        <Button title="Add Expense" onPress={addExpense} />
-      </View>
-
-      {/* LIST */}
-      <FlatList
-        data={filtered}
-        keyExtractor={(item) => item.id.toString()}
-        renderItem={renderExpense}
-        ListEmptyComponent={<Text style={styles.empty}>No expenses yet.</Text>}
-      />
-
-      {/* EDIT MODAL */}
-      <Modal visible={editModalVisible} animationType="slide">
-        <View style={styles.modal}>
-          <Text style={styles.modalHeading}>Edit Expense</Text>
-
-          <TextInput
-            style={styles.input}
-            value={String(editingExpense?.amount || '')}
-            onChangeText={(v) =>
-              setEditingExpense({ ...editingExpense, amount: v })
-            }
-            keyboardType="numeric"
-          />
-
-          <TextInput
-            style={styles.input}
-            value={editingExpense?.category || ''}
-            onChangeText={(v) =>
-              setEditingExpense({ ...editingExpense, category: v })
-            }
-          />
-
-          <TextInput
-            style={styles.input}
-            value={editingExpense?.note || ''}
-            onChangeText={(v) =>
-              setEditingExpense({ ...editingExpense, note: v })
-            }
-          />
-
-          <TouchableOpacity onPress={() => setShowEditPicker(true)}>
-            <Text style={styles.dateButton}>
-              Edit Date: {editDate.toLocaleDateString()}
+          
+          <Text style={styles.categoryHeading}>By Category:</Text>
+          {categoryTotals.map(item => (
+            <Text key={item.category} style={styles.categoryRow}>
+              • {item.category}: 
+              <Text style={styles.categoryTotalValue}> ${item.total.toFixed(2)}</Text>
             </Text>
-          </TouchableOpacity>
+          ))}
+        </View>
 
-          {showEditPicker && (
-            <DateTimePicker
-              value={editDate}
-              onChange={(e, selected) => {
-                setShowEditPicker(false);
-                if (selected) setEditDate(selected);
-              }}
-            />
-          )}
-
-          <Button title="Save Changes" onPress={saveEdit} />
-
-          <Button
-            title="Cancel"
-            color="red"
-            onPress={() => setEditModalVisible(false)}
+        {/* Expense Input Form */}
+        <View style={styles.form}>
+          <TextInput
+            style={styles.input}
+            placeholder="Amount (e.g. 12.50)"
+            placeholderTextColor="#9ca3af"
+            keyboardType="numeric"
+            value={amount}
+            onChangeText={setAmount}
           />
+          <TextInput
+            style={styles.input}
+            placeholder="Category (Food, Books, Rent...)"
+            placeholderTextColor="#9ca3af"
+            value={category}
+            onChangeText={setCategory}
+          />
+          <TextInput
+            style={styles.input}
+            placeholder="Note (optional)"
+            placeholderTextColor="#9ca3af"
+            value={note}
+            onChangeText={setNote}
+          />
+          <Button title="Add Expense" onPress={addExpense} />
+        </View>
+
+        <FlatList
+          data={expenses}
+          keyExtractor={(item) => item.id.toString()}
+          renderItem={renderExpense}
+          ListEmptyComponent={
+            <Text style={styles.empty}>No expenses yet for this filter.</Text>
+          }
+          // Prevents ScrollView/FlatList conflict when nested
+          scrollEnabled={false} 
+        />
+
+        <Text style={styles.footer}>
+          Enter your expenses and they’ll be saved locally with SQLite.
+        </Text>
+      </ScrollView>
+
+      {/* Task 3: Edit Modal */}
+      <Modal
+        visible={!!editingExpense}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setEditingExpense(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalHeading}>Edit Expense</Text>
+            
+            <TextInput
+              style={styles.input}
+              placeholder="Amount"
+              keyboardType="numeric"
+              value={editAmount}
+              onChangeText={setEditAmount}
+            />
+            <TextInput
+              style={styles.input}
+              placeholder="Category"
+              value={editCategory}
+              onChangeText={setEditCategory}
+            />
+            <TextInput
+              style={styles.input}
+              placeholder="Note"
+              value={editNote}
+              onChangeText={setEditNote}
+            />
+            
+            <View style={styles.modalButtonContainer}>
+              <Button title="Cancel" onPress={() => setEditingExpense(null)} color="#f87171"/>
+              <Button title="Save Changes" onPress={saveEditedExpense} color="#10b981"/>
+            </View>
+          </View>
         </View>
       </Modal>
+
     </SafeAreaView>
   );
 }
 
-// -----------------------------
-// STYLES
-// -----------------------------
+// ------------------------------------
+// Step 12: Styling
+// ------------------------------------
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 16, backgroundColor: '#111827' },
   heading: {
@@ -342,15 +407,75 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#fff',
     marginBottom: 16,
+    textAlign: 'center',
   },
-  filterRow: {
+  
+  // Task 1B Filter Styles
+  filterContainer: {
     flexDirection: 'row',
-    gap: 8,
-    marginBottom: 12,
-  },
-  form: {
+    justifyContent: 'space-between',
     marginBottom: 20,
     gap: 10,
+  },
+  filterButton: {
+    flex: 1,
+    padding: 10,
+    backgroundColor: '#374151',
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  activeFilterButton: {
+    backgroundColor: '#fbbf24',
+  },
+  filterText: {
+    color: '#fff',
+    fontWeight: '600',
+  },
+
+  // Task 2 Totals Styles
+  totalsContainer: {
+    backgroundColor: '#1f2937',
+    padding: 15,
+    borderRadius: 8,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#374151',
+  },
+  totalLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#e5e7eb',
+    marginBottom: 8,
+    borderBottomColor: '#374151',
+    borderBottomWidth: 1,
+    paddingBottom: 8,
+  },
+  overallTotalValue: {
+    color: '#34d399', // Green for highlight
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  categoryHeading: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#9ca3af',
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  categoryRow: {
+    fontSize: 14,
+    color: '#e5e7eb',
+    marginLeft: 10,
+  },
+  categoryTotalValue: {
+    fontWeight: '700',
+    color: '#fbbf24', // Gold highlight
+  },
+
+  // Form Styles (Unchanged)
+  form: {
+    marginBottom: 16,
+    gap: 8,
   },
   input: {
     padding: 10,
@@ -360,26 +485,15 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#374151',
   },
-  dateButton: {
-    color: '#fbbf24',
-    marginBottom: 8,
-  },
-  total: {
-    color: '#fff',
-    fontSize: 18,
-    marginBottom: 8,
-  },
-  categoryTotal: {
-    color: '#e5e7eb',
-    marginBottom: 4,
-  },
+
+  // Expense Row Styles (Updated for Task 3: Edit Button)
   expenseRow: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#1f2937',
     padding: 12,
     borderRadius: 8,
-    marginBottom: 10,
+    marginBottom: 8,
   },
   expenseAmount: {
     fontSize: 18,
@@ -394,24 +508,60 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#9ca3af',
   },
+  editButton: {
+    padding: 8,
+    borderRadius: 4,
+    backgroundColor: '#3b82f6', // Blue
+    marginRight: 10,
+  },
+  editText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
   delete: {
     color: '#f87171',
-    fontSize: 24,
+    fontSize: 20,
     marginLeft: 12,
   },
+  
+  // Footer/Empty/Modal Styles
   empty: {
     color: '#9ca3af',
-    marginTop: 20,
+    marginTop: 24,
     textAlign: 'center',
   },
-  modal: {
+  footer: {
+    textAlign: 'center',
+    color: '#6b7280',
+    marginTop: 12,
+    fontSize: 12,
+  },
+  modalOverlay: {
     flex: 1,
-    padding: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+  },
+  modalContent: {
+    width: '90%',
+    padding: 20,
     backgroundColor: '#111827',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#374151',
+    gap: 15,
   },
   modalHeading: {
     fontSize: 22,
+    fontWeight: 'bold',
     color: '#fff',
-    marginBottom: 16,
+    marginBottom: 10,
+    textAlign: 'center',
   },
+  modalButtonContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginTop: 10,
+  }
 });
