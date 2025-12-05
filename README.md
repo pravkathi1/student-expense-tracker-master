@@ -22,7 +22,7 @@ Installation
 
 Clone the repository:
 
-git clone https://github.com/YOUR_USERNAME/expense-tracker.git
+git clone https://github.com/pravkathi1/student-expense-tracker-master
 
 
 Install dependencies:
