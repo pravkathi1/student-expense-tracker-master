@@ -1,3 +1,6 @@
+import { BarChart } from 'react-native-chart-kit';
+import { Dimensions } from 'react-native';
+
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   SafeAreaView,
@@ -310,6 +313,29 @@ export default function ExpenseScreen() {
             </Text>
           ))}
         </View>
+{/* ---------------- Chart ---------------- */}
+<Text style={[styles.categoryHeading, { marginTop: 20 }]}>Expenses Chart</Text>
+<BarChart
+  data={{
+    labels: categoryTotals.map(item => item.category),
+    datasets: [
+      { data: categoryTotals.map(item => item.total) },
+    ],
+  }}
+  width={Dimensions.get('window').width - 32}
+  height={220}
+  fromZero={true}
+  chartConfig={{
+    backgroundColor: '#1f2937',
+    backgroundGradientFrom: '#1f2937',
+    backgroundGradientTo: '#1f2937',
+    decimalPlaces: 0,
+    color: (opacity = 1) => `rgba(251, 191, 36, ${opacity})`,
+    labelColor: (opacity = 1) => `rgba(229, 231, 235, ${opacity})`,
+    style: { borderRadius: 16 },
+  }}
+  style={{ marginVertical: 10, borderRadius: 16 }}
+/>
 
         {/* Expense Input Form */}
         <View style={styles.form}>
