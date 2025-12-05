@@ -11,6 +11,7 @@ Filter expenses by This Week, This Month, or All.
 View overall spending and totals by category.
 
 Bar chart showing category totals (capped at $1000).
+ FIRST YOU MUST ENTER CATEGORY AND AMOUNT FOR BAR CHART TO SHOW UP.
 
 Local storage with SQLite for persistent data.
 
